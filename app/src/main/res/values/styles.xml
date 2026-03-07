@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HealthChat" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#6750A4</item>
+        <item name="colorPrimaryContainer">#EADDFF</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#625B71</item>
+        <item name="colorSecondaryContainer">#E8DEF8</item>
+        <item name="colorSurface">#FFFBFE</item>
+        <item name="colorSurfaceVariant">#E7E0EC</item>
+        <item name="colorOnSurface">#1C1B1F</item>
+        <item name="colorOnSurfaceVariant">#49454F</item>
+        <item name="colorOutline">#79747E</item>
+        <item name="android:statusBarColor">#6750A4</item>
+        <item name="android:navigationBarColor">#F3EEF8</item>
+        <item name="android:windowBackground">@color/surface</item>
+    </style>
+
+    <!-- Session list item -->
+    <style name="SessionDivider">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">1dp</item>
+        <item name="android:background">#E7E0EC</item>
+    </style>
+</resources>
