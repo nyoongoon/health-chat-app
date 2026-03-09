@@ -5,7 +5,10 @@ import android.util.Log
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.*
+import androidx.health.connect.client.units.Energy
+import androidx.health.connect.client.units.Mass
 import androidx.health.connect.client.units.Power
+import androidx.health.connect.client.units.Volume
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import java.time.*
@@ -25,6 +28,44 @@ data class SleepBlock(
     val endHour: Int,
     val endMin: Int,
     val stage: String
+)
+
+// 영양 저장 결과 + 로그
+data class SaveNutritionResult(
+    val success: Boolean,
+    val log: String
+)
+
+data class NutritionEntry(
+    val recordId: String,
+    val foodName: String?,
+    val calories: Double,
+    val carbs: Double?,
+    val protein: Double?,
+    val fat: Double?,
+    val mealType: Int,
+    val startTime: java.time.Instant
+)
+
+data class WaterEntry(
+    val recordId: String,
+    val ml: Double,
+    val time: java.time.Instant
+)
+
+data class WaterIntakeSummary(
+    val totalMl: Double,
+    val entries: List<WaterEntry>
+)
+
+data class WeeklyTrendDay(
+    val date: LocalDate,
+    val steps: Long?,
+    val caloriesBurned: Double?,
+    val sleepHours: Double?,
+    val heartRateAvg: Long?,
+    val waterMl: Double?,
+    val nutritionCalories: Double?
 )
 
 data class HealthSummary(
@@ -212,6 +253,11 @@ class HealthDataReader(private val context: Context) {
             HealthPermission.getReadPermission(LeanBodyMassRecord::class),
             HealthPermission.getReadPermission(BasalMetabolicRateRecord::class),
             HealthPermission.getReadPermission(HeightRecord::class),
+            HealthPermission.getReadPermission(NutritionRecord::class),
+            HealthPermission.getWritePermission(NutritionRecord::class),
+            HealthPermission.getReadPermission(HydrationRecord::class),
+            HealthPermission.getWritePermission(HydrationRecord::class),
+            HealthPermission.getReadPermission(HeartRateVariabilityRmssdRecord::class),
         )
 
         private const val TAG = "HealthDataReader"
@@ -484,6 +530,458 @@ class HealthDataReader(private val context: Context) {
             basalMetabolicRate = basalMetabolicRate,
             height = height
         )
+    }
+
+    // Health Connect용 음식명 정제 (특수문자, 너무 긴 이름 제거)
+    private fun sanitizeFoodName(raw: String): String {
+        return raw
+            .split("+", "＋").first()   // '카레라이스 2인분 + 김치' → '카레라이스 2인분'
+            .replace(Regex("[^가-힣a-zA-Z0-9 ()]"), "")  // 특수문자 제거
+            .trim()
+            .take(40)  // 최대 40자
+            .ifBlank { "음식" }
+    }
+
+    suspend fun saveNutritionWithLog(
+        foodName: String,
+        calories: Double,
+        carbs: Double?,
+        protein: Double?,
+        fat: Double?,
+        mealTypeStr: String?
+    ): SaveNutritionResult {
+        val logs = StringBuilder()
+        logs.appendLine("▶▶ Health Connect insertRecords 호출 (HC 1.1.0 / API36)")
+        try {
+            // 1단계: WRITE_NUTRITION 권한 실제 부여 여부 확인
+            val grantedPerms = healthConnectClient.permissionController.getGrantedPermissions()
+            val writeNutritionPerm = HealthPermission.getWritePermission(NutritionRecord::class)
+            val hasWritePerm = grantedPerms.contains(writeNutritionPerm)
+            logs.appendLine("  • WRITE_NUTRITION 권한: ${if (hasWritePerm) "✅ 부여됨" else "❌ 미부여"}")
+            logs.appendLine("  • 부여된 전체 권한 수: ${grantedPerms.size}")
+            if (!hasWritePerm) {
+                logs.appendLine("  ❌ WRITE_NUTRITION 권한 없음 - Health Connect 앱에서 허용 필요")
+                return SaveNutritionResult(false, logs.toString().trimEnd())
+            }
+
+            // 과거 시간 사용 (Health Connect는 미래 시간 거부)
+            val endTime = Instant.now()
+            val startTime = endTime.minusSeconds(300)  // 5분 전
+            val zoneOffset = ZoneOffset.systemDefault().rules.getOffset(endTime)
+            logs.appendLine("  • 시간: $startTime ~ $endTime / 타임존: $zoneOffset")
+            logs.appendLine("  • 칼로리: ${calories}kcal, 탄: ${carbs}g, 단: ${protein}g, 지: ${fat}g")
+
+            // mealTypeStr → MealType 변환 (사용자 선택 우선, 없으면 시간대 기반)
+            val resolvedMealType = when (mealTypeStr?.lowercase()) {
+                "breakfast" -> MealType.MEAL_TYPE_BREAKFAST
+                "lunch" -> MealType.MEAL_TYPE_LUNCH
+                "dinner" -> MealType.MEAL_TYPE_DINNER
+                "snack" -> MealType.MEAL_TYPE_SNACK
+                else -> {
+                    val hour = java.time.LocalTime.now().hour
+                    when {
+                        hour in 6..10 -> MealType.MEAL_TYPE_BREAKFAST
+                        hour in 11..14 -> MealType.MEAL_TYPE_LUNCH
+                        hour in 17..21 -> MealType.MEAL_TYPE_DINNER
+                        else -> MealType.MEAL_TYPE_SNACK
+                    }
+                }
+            }
+            logs.appendLine("  • 식사 타입: ${mealTypeStr ?: "자동"} → $resolvedMealType")
+
+            // 시도1: ZoneOffset 명시 + 전체 필드 (삼성헬스 호환 최적 형식)
+            logs.appendLine("  • 시도1: ZoneOffset=${zoneOffset}, 전체 필드, mealType=${resolvedMealType}...")
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val fullRecord = NutritionRecord(
+                        startTime = startTime,
+                        endTime = endTime,
+                        startZoneOffset = zoneOffset,
+                        endZoneOffset = zoneOffset,
+                        energy = Energy.kilocalories(calories.coerceAtLeast(1.0)),
+                        totalCarbohydrate = carbs?.coerceAtLeast(0.0)?.let { Mass.grams(it) },
+                        protein = protein?.coerceAtLeast(0.0)?.let { Mass.grams(it) },
+                        totalFat = fat?.coerceAtLeast(0.0)?.let { Mass.grams(it) },
+                        name = sanitizeFoodName(foodName).ifBlank { null },
+                        mealType = resolvedMealType
+                    )
+                    healthConnectClient.insertRecords(listOf(fullRecord))
+                }
+                logs.appendLine("  ✅ 시도1 성공!")
+                return SaveNutritionResult(true, logs.toString().trimEnd())
+            } catch (e1: Exception) {
+                logs.appendLine("  ❌ 시도1 실패: ${e1.javaClass.simpleName}: ${e1.message?.take(150)}")
+                Log.e(TAG, "시도1 실패", e1)
+            }
+
+            // 시도2: null ZoneOffset + energy 전용 (폴백)
+            logs.appendLine("  • 시도2: null ZoneOffset, energy 전용...")
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val minRecord = NutritionRecord(
+                        startTime = startTime,
+                        endTime = endTime,
+                        startZoneOffset = null,
+                        endZoneOffset = null,
+                        energy = Energy.kilocalories(calories.coerceAtLeast(1.0))
+                    )
+                    healthConnectClient.insertRecords(listOf(minRecord))
+                }
+                logs.appendLine("  ✅ 시도2 성공!")
+                return SaveNutritionResult(true, logs.toString().trimEnd())
+            } catch (e2: Exception) {
+                logs.appendLine("  ❌ 시도2 실패: ${e2.javaClass.simpleName}: ${e2.message?.take(150)}")
+                Log.e(TAG, "시도2 실패", e2)
+            }
+
+            // 시도3: Energy.joules() 단위 변환
+            logs.appendLine("  • 시도3: Energy.joules() 단위...")
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val joulesRecord = NutritionRecord(
+                        startTime = startTime,
+                        endTime = endTime,
+                        startZoneOffset = null,
+                        endZoneOffset = null,
+                        energy = Energy.joules(calories.coerceAtLeast(1.0) * 4184.0)
+                    )
+                    healthConnectClient.insertRecords(listOf(joulesRecord))
+                }
+                logs.appendLine("  ✅ 시도3 성공!")
+                return SaveNutritionResult(true, logs.toString().trimEnd())
+            } catch (e3: Exception) {
+                logs.appendLine("  ❌ 시도3 실패: ${e3.javaClass.simpleName}: ${e3.message?.take(150)}")
+                Log.e(TAG, "시도3 실패", e3)
+            }
+
+            // 시도4: Samsung Health SDK 서비스 바인딩 (IHealthDataStore)
+            logs.appendLine("  • 시도4: Samsung Health SDK 서비스 바인딩...")
+            try {
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    trySamsungHealthSDK(foodName, calories, carbs, protein, fat, logs)
+                }
+                if (result) {
+                    logs.appendLine("  ✅ 시도4 Samsung Health SDK 성공!")
+                    return SaveNutritionResult(true, logs.toString().trimEnd())
+                }
+            } catch (e4: Exception) {
+                logs.appendLine("  ❌ 시도4 실패: ${e4.javaClass.simpleName}: ${e4.message?.take(150)}")
+                Log.e(TAG, "시도4 실패", e4)
+            }
+
+            // 시도5: 1시간 전 시간으로 재시도
+            logs.appendLine("  • 시도5: 1시간 전 시간, 최소 필드...")
+            try {
+                val endTime2 = Instant.now().minusSeconds(3600)
+                val startTime2 = endTime2.minusSeconds(300)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val record = NutritionRecord(
+                        startTime = startTime2,
+                        endTime = endTime2,
+                        startZoneOffset = null,
+                        endZoneOffset = null,
+                        energy = Energy.kilocalories(calories.coerceAtLeast(1.0))
+                    )
+                    healthConnectClient.insertRecords(listOf(record))
+                }
+                logs.appendLine("  ✅ 시도5 성공!")
+                return SaveNutritionResult(true, logs.toString().trimEnd())
+            } catch (e5: Exception) {
+                logs.appendLine("  ❌ 시도5 실패: ${e5.javaClass.simpleName}: ${e5.message?.take(150)}")
+            }
+
+            logs.appendLine("  ❌ 모든 시도 실패")
+            return SaveNutritionResult(false, logs.toString().trimEnd())
+
+        } catch (e: SecurityException) {
+            logs.appendLine("  ❌ SecurityException: 권한 부족")
+            logs.appendLine("     ${e.message}")
+            Log.e(TAG, "NutritionRecord save failed - SecurityException", e)
+            return SaveNutritionResult(false, logs.toString().trimEnd())
+
+        } catch (e: IllegalArgumentException) {
+            logs.appendLine("  ❌ IllegalArgumentException: ${e.message?.take(150)}")
+            Log.e(TAG, "NutritionRecord save failed - IllegalArgumentException", e)
+            return SaveNutritionResult(false, logs.toString().trimEnd())
+
+        } catch (e: Exception) {
+            logs.appendLine("  ❌ ${e.javaClass.simpleName}: ${e.message}")
+            logs.appendLine("     StackTrace: ${e.stackTraceToString().take(300)}")
+            Log.e(TAG, "NutritionRecord save failed", e)
+            return SaveNutritionResult(false, logs.toString().trimEnd())
+        }
+    }
+
+    // Samsung Health SDK 직접 바인딩 시도
+    private suspend fun trySamsungHealthSDK(
+        foodName: String,
+        calories: Double,
+        carbs: Double?,
+        protein: Double?,
+        fat: Double?,
+        logs: StringBuilder
+    ): Boolean {
+        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val intent = android.content.Intent("com.samsung.android.sdk.healthdata.IHealthDataStore")
+            intent.setPackage("com.sec.android.app.shealth")
+
+            val conn = object : android.content.ServiceConnection {
+                override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
+                    logs.appendLine("    Samsung Health 서비스 연결됨: $name")
+                    try {
+                        context.unbindService(this)
+                    } catch (e: Exception) {}
+                    // 연결 확인만 - 실제 AIDL 없이는 데이터 삽입 불가
+                    cont.resume(false) {}
+                }
+                override fun onServiceDisconnected(name: android.content.ComponentName?) {
+                    logs.appendLine("    Samsung Health 서비스 연결 끊김")
+                    if (cont.isActive) cont.resume(false) {}
+                }
+            }
+            val bound = try {
+                context.bindService(intent, conn, android.content.Context.BIND_AUTO_CREATE)
+            } catch (e: Exception) {
+                logs.appendLine("    bindService 실패: ${e.message}")
+                false
+            }
+            if (!bound) {
+                logs.appendLine("    bindService 반환 false (서비스 없음)")
+                cont.resume(false) {}
+            }
+        }
+    }
+
+    // 하위 호환성을 위한 기존 함수
+    suspend fun saveNutrition(
+        foodName: String,
+        calories: Double,
+        carbs: Double?,
+        protein: Double?,
+        fat: Double?,
+        mealTypeStr: String?
+    ): Boolean {
+        val result = saveNutritionWithLog(foodName, calories, carbs, protein, fat, mealTypeStr)
+        return result.success
+    }
+
+    // ==================== 식사 기록 읽기 / 삭제 ====================
+
+    suspend fun readTodayNutrition(): List<NutritionEntry> {
+        val zone = ZoneId.systemDefault()
+        val startOfDay = LocalDate.now().atStartOfDay(zone).toInstant()
+        val now = java.time.Instant.now()
+        return try {
+            healthConnectClient.readRecords(
+                ReadRecordsRequest(NutritionRecord::class, TimeRangeFilter.between(startOfDay, now))
+            ).records.map { rec ->
+                NutritionEntry(
+                    recordId = rec.metadata.id,
+                    foodName = rec.name,
+                    calories = rec.energy?.inKilocalories ?: 0.0,
+                    carbs = rec.totalCarbohydrate?.inGrams,
+                    protein = rec.protein?.inGrams,
+                    fat = rec.totalFat?.inGrams,
+                    mealType = rec.mealType,
+                    startTime = rec.startTime
+                )
+            }.sortedBy { it.startTime }
+        } catch (e: Exception) {
+            Log.w(TAG, "readTodayNutrition failed", e)
+            emptyList()
+        }
+    }
+
+    suspend fun deleteNutritionRecord(recordId: String): Boolean {
+        return try {
+            healthConnectClient.deleteRecords(
+                NutritionRecord::class,
+                listOf(recordId),
+                emptyList()
+            )
+            Log.d(TAG, "deleteNutritionRecord success: $recordId")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "deleteNutritionRecord failed", e)
+            false
+        }
+    }
+
+    // ==================== 수분 섭취 ====================
+
+    suspend fun readTodayWater(): WaterIntakeSummary {
+        val zone = ZoneId.systemDefault()
+        val startOfDay = LocalDate.now().atStartOfDay(zone).toInstant()
+        val now = java.time.Instant.now()
+        return try {
+            val records = healthConnectClient.readRecords(
+                ReadRecordsRequest(HydrationRecord::class, TimeRangeFilter.between(startOfDay, now))
+            ).records
+            val entries = records.map { rec ->
+                WaterEntry(
+                    recordId = rec.metadata.id,
+                    ml = rec.volume.inLiters * 1000.0,
+                    time = rec.startTime
+                )
+            }
+            WaterIntakeSummary(totalMl = entries.sumOf { it.ml }, entries = entries)
+        } catch (e: Exception) {
+            Log.w(TAG, "readTodayWater failed", e)
+            WaterIntakeSummary(0.0, emptyList())
+        }
+    }
+
+    suspend fun saveWaterIntake(ml: Double): Boolean {
+        return try {
+            val now = java.time.Instant.now()
+            val zoneOffset = ZoneOffset.systemDefault().rules.getOffset(now)
+            healthConnectClient.insertRecords(listOf(
+                HydrationRecord(
+                    startTime = now.minusSeconds(60),
+                    endTime = now,
+                    startZoneOffset = zoneOffset,
+                    endZoneOffset = zoneOffset,
+                    volume = Volume.liters(ml / 1000.0)
+                )
+            ))
+            Log.d(TAG, "saveWaterIntake success: ${ml}ml")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "saveWaterIntake failed", e)
+            false
+        }
+    }
+
+    // ==================== HRV ====================
+
+    suspend fun readTodayHrv(): Double? {
+        val zone = ZoneId.systemDefault()
+        val startOfDay = LocalDate.now().atStartOfDay(zone).toInstant()
+        val now = java.time.Instant.now()
+        return try {
+            val records = healthConnectClient.readRecords(
+                ReadRecordsRequest(HeartRateVariabilityRmssdRecord::class, TimeRangeFilter.between(startOfDay, now))
+            ).records
+            if (records.isNotEmpty()) records.last().heartRateVariabilityMillis else null
+        } catch (e: Exception) {
+            Log.w(TAG, "readTodayHrv failed", e)
+            null
+        }
+    }
+
+    // ==================== 주간 트렌드 ====================
+
+    suspend fun readWeeklyTrends(): List<WeeklyTrendDay> {
+        val zone = ZoneId.systemDefault()
+        val now = java.time.Instant.now()
+        val sevenDaysAgo = LocalDate.now().minusDays(6).atStartOfDay(zone).toInstant()
+        val timeRange = TimeRangeFilter.between(sevenDaysAgo, now)
+        val sleepRange = TimeRangeFilter.between(LocalDate.now().minusDays(7).atTime(18, 0).atZone(zone).toInstant(), now)
+
+        val stepsRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(StepsRecord::class, timeRange)).records } catch (e: Exception) { emptyList() }
+        val calRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(TotalCaloriesBurnedRecord::class, timeRange)).records } catch (e: Exception) { emptyList() }
+        val sleepRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(SleepSessionRecord::class, sleepRange)).records } catch (e: Exception) { emptyList() }
+        val hrRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(HeartRateRecord::class, timeRange)).records } catch (e: Exception) { emptyList() }
+        val waterRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(HydrationRecord::class, timeRange)).records } catch (e: Exception) { emptyList() }
+        val nutritionRecs = try { healthConnectClient.readRecords(ReadRecordsRequest(NutritionRecord::class, timeRange)).records } catch (e: Exception) { emptyList() }
+
+        val stepsByDay = stepsRecs.groupBy { it.startTime.atZone(zone).toLocalDate() }
+        val calByDay = calRecs.groupBy { it.startTime.atZone(zone).toLocalDate() }
+        val hrByDay = hrRecs.groupBy { it.startTime.atZone(zone).toLocalDate() }
+        val waterByDay = waterRecs.groupBy { it.startTime.atZone(zone).toLocalDate() }
+        val nutritionByDay = nutritionRecs.groupBy { it.startTime.atZone(zone).toLocalDate() }
+
+        val sleepByDay = mutableMapOf<LocalDate, Double>()
+        for (s in sleepRecs) {
+            val wakeDate = s.endTime.atZone(zone).toLocalDate()
+            sleepByDay[wakeDate] = (sleepByDay[wakeDate] ?: 0.0) +
+                Duration.between(s.startTime, s.endTime).toMillis() / 3600000.0
+        }
+
+        return (6 downTo 0).map { i ->
+            val date = LocalDate.now().minusDays(i.toLong())
+            val hrSamples = hrByDay[date]?.flatMap { it.samples }
+            WeeklyTrendDay(
+                date = date,
+                steps = stepsByDay[date]?.sumOf { it.count }?.takeIf { it > 0 },
+                caloriesBurned = calByDay[date]?.sumOf { it.energy.inKilocalories }?.takeIf { it > 0 },
+                sleepHours = sleepByDay[date],
+                heartRateAvg = if (hrSamples != null && hrSamples.isNotEmpty()) hrSamples.map { it.beatsPerMinute }.average().toLong() else null,
+                waterMl = waterByDay[date]?.sumOf { it.volume.inLiters * 1000 }?.takeIf { it > 0 },
+                nutritionCalories = nutritionByDay[date]?.sumOf { it.energy?.inKilocalories ?: 0.0 }?.takeIf { it > 0 }
+            )
+        }
+    }
+
+    // ==================== AI 코치 종합 컨텍스트 ====================
+
+    suspend fun buildComprehensiveAiCoachContext(): String {
+        val sb = StringBuilder()
+        try {
+            val summary = readTodayData()
+            sb.appendLine("=== 오늘 건강 데이터 ===")
+            sb.appendLine(summary.toContextString())
+        } catch (e: Exception) { Log.w(TAG, "coach: health data failed", e) }
+
+        try {
+            val nutrition = readTodayNutrition()
+            if (nutrition.isNotEmpty()) {
+                sb.appendLine()
+                sb.appendLine("=== 오늘 식사 기록 ===")
+                sb.appendLine("총 섭취 칼로리: ${"%.0f".format(nutrition.sumOf { it.calories })}kcal")
+                for (n in nutrition) {
+                    val mealStr = mealTypeToKorean(n.mealType)
+                    sb.append("$mealStr: ${n.foodName ?: "음식"} ${"%.0f".format(n.calories)}kcal")
+                    val nutrients = listOfNotNull(
+                        n.carbs?.let { "탄${"%.1f".format(it)}g" },
+                        n.protein?.let { "단${"%.1f".format(it)}g" },
+                        n.fat?.let { "지${"%.1f".format(it)}g" }
+                    ).joinToString(" ")
+                    if (nutrients.isNotEmpty()) sb.append(" ($nutrients)")
+                    sb.appendLine()
+                }
+            }
+        } catch (e: Exception) { Log.w(TAG, "coach: nutrition failed", e) }
+
+        try {
+            val water = readTodayWater()
+            if (water.totalMl > 0) {
+                sb.appendLine()
+                sb.appendLine("=== 수분 섭취 ===")
+                sb.appendLine("오늘 수분: ${"%.0f".format(water.totalMl)}ml / 목표 2000ml")
+            }
+        } catch (e: Exception) { Log.w(TAG, "coach: water failed", e) }
+
+        try {
+            readTodayHrv()?.let { sb.appendLine("HRV: ${"%.1f".format(it)}ms") }
+        } catch (e: Exception) {}
+
+        try {
+            val trends = readWeeklyTrends()
+            if (trends.isNotEmpty()) {
+                sb.appendLine()
+                sb.appendLine("=== 주간 트렌드 (7일) ===")
+                for (day in trends) {
+                    val dayStr = day.date.format(DateTimeFormatter.ofPattern("M/d(E)", java.util.Locale.KOREAN))
+                    val parts = mutableListOf<String>()
+                    day.steps?.let { parts.add("${"%,d".format(it)}보") }
+                    day.caloriesBurned?.let { parts.add("소모${"%.0f".format(it)}kcal") }
+                    day.sleepHours?.let { parts.add("수면${"%.1f".format(it)}h") }
+                    day.nutritionCalories?.let { parts.add("섭취${"%.0f".format(it)}kcal") }
+                    sb.appendLine("$dayStr: ${if (parts.isEmpty()) "데이터없음" else parts.joinToString(", ")}")
+                }
+            }
+        } catch (e: Exception) { Log.w(TAG, "coach: weekly trends failed", e) }
+
+        return sb.toString().trimEnd()
+    }
+
+    fun mealTypeToKorean(mealType: Int): String = when (mealType) {
+        MealType.MEAL_TYPE_BREAKFAST -> "🌅 아침"
+        MealType.MEAL_TYPE_LUNCH -> "☀️ 점심"
+        MealType.MEAL_TYPE_DINNER -> "🌙 저녁"
+        MealType.MEAL_TYPE_SNACK -> "🍪 간식"
+        else -> "🍽️ 식사"
     }
 
     private fun exerciseTypeName(type: Int): String = when (type) {
