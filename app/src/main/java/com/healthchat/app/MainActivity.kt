@@ -55,7 +55,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sessionsPanelContainer: LinearLayout
     private lateinit var sessionsRecyclerView: RecyclerView
     private lateinit var btnNewSession: Button
-    private lateinit var btnClosePanel: TextView
+    private lateinit var btnClosePanel: ImageView
     private lateinit var tvSessionSubtitle: TextView
 
     private var currentHealthContext: String? = null
