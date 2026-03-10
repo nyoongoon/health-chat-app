@@ -31,7 +31,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="Health Chat"
         android:supportsRtl="true"
-        android:theme="@style/Theme.HealthChat"
+        android:theme="@style/Theme.HealthChat.Daangn"
         android:networkSecurityConfig="@xml/network_security_config"
         tools:targetApi="34">
 

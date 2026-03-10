@@ -41,4 +41,14 @@
     <!-- Session panel -->
     <color name="panel_bg">#FFFBFE</color>
     <color name="session_selected_bg">#EADDFF</color>
+
+    <!-- Daangn Market Colors -->
+    <color name="daangn_primary">#FF6F0F</color>
+    <color name="daangn_primary_light">#FFF3EB</color>
+    <color name="daangn_background">#FFFFFF</color>
+    <color name="daangn_surface">#F8F8F8</color>
+    <color name="daangn_text_primary">#1C1B1F</color>
+    <color name="daangn_text_secondary">#666666</color>
+    <color name="daangn_success">#2EA44F</color>
+    <color name="daangn_error">#B3261E</color>
 </resources>

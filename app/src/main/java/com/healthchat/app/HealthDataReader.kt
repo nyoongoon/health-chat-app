@@ -11,8 +11,21 @@ import androidx.health.connect.client.units.Power
 import androidx.health.connect.client.units.Volume
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import androidx.health.connect.client.records.BloodPressureRecord
+import androidx.health.connect.client.records.BloodGlucoseRecord
+import androidx.health.connect.client.records.RespiratoryRateRecord
+import androidx.health.connect.client.records.Vo2MaxRecord
+import androidx.health.connect.client.records.FloorsClimbedRecord
+import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import java.time.*
 import java.time.format.DateTimeFormatter
+
+data class HeartRateSample(
+    val bpm: Long?,
+    val timeStr: String,
+    val recentAvg: Long?,
+    val sampleCount: Int
+)
 
 data class HourlyData(
     val hour: Int,
@@ -88,7 +101,22 @@ data class HealthSummary(
     val leanBodyMass: Double? = null,
     val bmi: Double? = null,
     val basalMetabolicRate: Int? = null,
-    val height: Double? = null
+    val height: Double? = null,
+    val bloodPressureSystolic: Double? = null,
+    val bloodPressureDiastolic: Double? = null,
+    val bloodGlucose: Double? = null,
+    val respiratoryRate: Double? = null,
+    val vo2Max: Double? = null,
+    val floorsClimbed: Double? = null,
+    val activeCaloriesBurned: Double? = null,
+    val healthScore: Int? = null,
+    val sleepScore: Int? = null,
+    val hrv: Double? = null,
+    val stressLevel: String? = null,
+    val nutritionTodayCalories: Double? = null,
+    val nutritionTodayCarbs: Double? = null,
+    val nutritionTodayProtein: Double? = null,
+    val nutritionTodayFat: Double? = null,
 ) {
     fun toDisplayText(): String {
         val sb = StringBuilder()
@@ -258,6 +286,12 @@ class HealthDataReader(private val context: Context) {
             HealthPermission.getReadPermission(HydrationRecord::class),
             HealthPermission.getWritePermission(HydrationRecord::class),
             HealthPermission.getReadPermission(HeartRateVariabilityRmssdRecord::class),
+            HealthPermission.getReadPermission(BloodPressureRecord::class),
+            HealthPermission.getReadPermission(BloodGlucoseRecord::class),
+            HealthPermission.getReadPermission(RespiratoryRateRecord::class),
+            HealthPermission.getReadPermission(Vo2MaxRecord::class),
+            HealthPermission.getReadPermission(FloorsClimbedRecord::class),
+            HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class),
         )
 
         private const val TAG = "HealthDataReader"
@@ -509,6 +543,103 @@ class HealthDataReader(private val context: Context) {
             )
         }
 
+        // Blood Pressure
+        var bloodPressureSystolic: Double? = null
+        var bloodPressureDiastolic: Double? = null
+        try {
+            val bpRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(BloodPressureRecord::class, timeRange)
+            ).records
+            if (bpRecords.isNotEmpty()) {
+                val last = bpRecords.last()
+                bloodPressureSystolic = last.systolic.inMillimetersOfMercury
+                bloodPressureDiastolic = last.diastolic.inMillimetersOfMercury
+            }
+        } catch (e: Exception) { Log.w(TAG, "BloodPressure read failed: ${e.message}") }
+
+        // Blood Glucose
+        var bloodGlucose: Double? = null
+        try {
+            val bgRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(BloodGlucoseRecord::class, timeRange)
+            ).records
+            if (bgRecords.isNotEmpty()) {
+                bloodGlucose = bgRecords.last().level.inMillimolesPerLiter * 18.018
+            }
+        } catch (e: Exception) { Log.w(TAG, "BloodGlucose read failed: ${e.message}") }
+
+        // Respiratory Rate
+        var respiratoryRate: Double? = null
+        try {
+            val rrRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(RespiratoryRateRecord::class, timeRange)
+            ).records
+            if (rrRecords.isNotEmpty()) respiratoryRate = rrRecords.last().rate
+        } catch (e: Exception) { Log.w(TAG, "RespiratoryRate read failed: ${e.message}") }
+
+        // Vo2Max
+        var vo2Max: Double? = null
+        try {
+            val vo2Records = healthConnectClient.readRecords(
+                ReadRecordsRequest(Vo2MaxRecord::class, monthRange)
+            ).records
+            if (vo2Records.isNotEmpty()) vo2Max = vo2Records.last().vo2MillilitersPerMinuteKilogram
+        } catch (e: Exception) { Log.w(TAG, "Vo2Max read failed: ${e.message}") }
+
+        // Floors Climbed
+        var floorsClimbed: Double? = null
+        try {
+            val floorRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(FloorsClimbedRecord::class, timeRange)
+            ).records
+            val total = floorRecords.sumOf { it.floors }
+            if (total > 0) floorsClimbed = total
+        } catch (e: Exception) { Log.w(TAG, "FloorsClimbed read failed: ${e.message}") }
+
+        // Active Calories Burned
+        var activeCaloriesBurned: Double? = null
+        try {
+            val activeCalRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(ActiveCaloriesBurnedRecord::class, timeRange)
+            ).records
+            val total = activeCalRecords.sumOf { it.energy.inKilocalories }
+            if (total > 0) activeCaloriesBurned = total
+        } catch (e: Exception) { Log.w(TAG, "ActiveCalories read failed: ${e.message}") }
+
+        // HRV inline
+        var hrvValue: Double? = null
+        try {
+            val hrvRecords = healthConnectClient.readRecords(
+                ReadRecordsRequest(HeartRateVariabilityRmssdRecord::class, timeRange)
+            ).records
+            if (hrvRecords.isNotEmpty()) hrvValue = hrvRecords.last().heartRateVariabilityMillis
+        } catch (e: Exception) { Log.w(TAG, "HRV inline read failed: ${e.message}") }
+
+        // Today Nutrition Totals
+        var nutritionCalsTodayTotal: Double? = null
+        var nutritionCarbsTotal: Double? = null
+        var nutritionProteinTotal: Double? = null
+        var nutritionFatTotal: Double? = null
+        try {
+            val nutritionRecs = healthConnectClient.readRecords(
+                ReadRecordsRequest(NutritionRecord::class, timeRange)
+            ).records
+            if (nutritionRecs.isNotEmpty()) {
+                val totalCals = nutritionRecs.sumOf { it.energy?.inKilocalories ?: 0.0 }
+                val totalCarbs = nutritionRecs.sumOf { it.totalCarbohydrate?.inGrams ?: 0.0 }
+                val totalProtein = nutritionRecs.sumOf { it.protein?.inGrams ?: 0.0 }
+                val totalFat = nutritionRecs.sumOf { it.totalFat?.inGrams ?: 0.0 }
+                if (totalCals > 0) nutritionCalsTodayTotal = totalCals
+                if (totalCarbs > 0) nutritionCarbsTotal = totalCarbs
+                if (totalProtein > 0) nutritionProteinTotal = totalProtein
+                if (totalFat > 0) nutritionFatTotal = totalFat
+            }
+        } catch (e: Exception) { Log.w(TAG, "Nutrition totals read failed: ${e.message}") }
+
+        val healthScoreVal = calculateHealthScore(steps, heartRateAvg, sleepHours, oxygenSat, bmi, activeCaloriesBurned, hrvValue, bloodPressureSystolic)
+        val sleepScoreVal = calculateSleepScore(sleepHours, sleepBlockList)
+        val stressLevelVal = estimateStressLevel(hrvValue)
+
         return HealthSummary(
             steps = steps,
             heartRateAvg = heartRateAvg,
@@ -528,8 +659,117 @@ class HealthDataReader(private val context: Context) {
             leanBodyMass = leanBodyMass,
             bmi = bmi,
             basalMetabolicRate = basalMetabolicRate,
-            height = height
+            height = height,
+            bloodPressureSystolic = bloodPressureSystolic,
+            bloodPressureDiastolic = bloodPressureDiastolic,
+            bloodGlucose = bloodGlucose,
+            respiratoryRate = respiratoryRate,
+            vo2Max = vo2Max,
+            floorsClimbed = floorsClimbed,
+            activeCaloriesBurned = activeCaloriesBurned,
+            healthScore = healthScoreVal,
+            sleepScore = sleepScoreVal,
+            hrv = hrvValue,
+            stressLevel = stressLevelVal,
+            nutritionTodayCalories = nutritionCalsTodayTotal,
+            nutritionTodayCarbs = nutritionCarbsTotal,
+            nutritionTodayProtein = nutritionProteinTotal,
+            nutritionTodayFat = nutritionFatTotal,
         )
+    }
+
+    private fun calculateHealthScore(
+        steps: Long?, heartRateAvg: Long?, sleepHours: Double?,
+        oxygenSat: Double?, bmi: Double?, activeCalories: Double?,
+        hrv: Double?, bloodPressureSystolic: Double?
+    ): Int {
+        var score = 0
+        var maxScore = 0
+        steps?.let {
+            score += ((it.toDouble() / 10000.0) * 25).toInt().coerceIn(0, 25)
+            maxScore += 25
+        }
+        sleepHours?.let {
+            score += when {
+                it in 7.0..9.0 -> 20; it in 6.0..9.5 -> 14; it in 5.0..10.0 -> 7; else -> 2
+            }
+            maxScore += 20
+        }
+        heartRateAvg?.let {
+            score += when { it in 60..80 -> 15; it in 50..90 -> 10; it in 45..100 -> 5; else -> 0 }
+            maxScore += 15
+        }
+        oxygenSat?.let {
+            score += when { it >= 95.0 -> 15; it >= 90.0 -> 8; else -> 0 }
+            maxScore += 15
+        }
+        bmi?.let {
+            score += when { it in 18.5..23.0 -> 15; it in 17.0..25.0 -> 10; it in 15.0..30.0 -> 5; else -> 0 }
+            maxScore += 15
+        }
+        hrv?.let {
+            score += when { it >= 60.0 -> 10; it >= 35.0 -> 7; it >= 15.0 -> 3; else -> 0 }
+            maxScore += 10
+        }
+        if (maxScore == 0) return 70
+        return ((score.toDouble() / maxScore.toDouble()) * 100).toInt().coerceIn(0, 100)
+    }
+
+    private fun calculateSleepScore(sleepHours: Double?, sleepBlocks: List<SleepBlock>): Int {
+        if (sleepHours == null) return 0
+        var score = when {
+            sleepHours in 7.0..9.0 -> 60; sleepHours in 6.0..9.5 -> 45; sleepHours in 5.0..10.0 -> 25; else -> 10
+        }
+        if (sleepBlocks.isNotEmpty()) {
+            val deepMinutes = sleepBlocks.filter { it.stage == "깊은수면" }.sumOf {
+                val startM = it.startHour * 60 + it.startMin
+                val endM = it.endHour * 60 + it.endMin
+                if (endM >= startM) endM - startM else endM + 1440 - startM
+            }
+            val totalMinutes = (sleepHours * 60).toInt()
+            val deepRatio = if (totalMinutes > 0) deepMinutes.toDouble() / totalMinutes else 0.0
+            score += when { deepRatio >= 0.20 -> 40; deepRatio >= 0.13 -> 28; deepRatio >= 0.05 -> 15; else -> 5 }
+        } else score += 30
+        return score.coerceIn(0, 100)
+    }
+
+    fun estimateStressLevel(hrv: Double?): String = when {
+        hrv == null -> "데이터없음"
+        hrv >= 60.0 -> "낮음"
+        hrv >= 35.0 -> "보통"
+        hrv >= 15.0 -> "높음"
+        else -> "매우높음"
+    }
+
+    // ==================== 실시간 심박수 ====================
+
+    /** 최근 N분 심박수 읽기 - 실시간 모니터링용 */
+    suspend fun readLatestHeartRate(windowMinutes: Long = 3): HeartRateSample {
+        return try {
+            val now = Instant.now()
+            val start = now.minusSeconds(windowMinutes * 60)
+            val timeRange = TimeRangeFilter.between(start, now)
+            val records = healthConnectClient.readRecords(
+                ReadRecordsRequest(HeartRateRecord::class, timeRange)
+            ).records
+            val allSamples = records.flatMap { it.samples }
+            if (allSamples.isNotEmpty()) {
+                val latest = allSamples.maxByOrNull { it.time }!!
+                val timeStr = latest.time.atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                HeartRateSample(
+                    bpm = latest.beatsPerMinute,
+                    timeStr = timeStr,
+                    recentAvg = allSamples.map { it.beatsPerMinute }.average().toLong(),
+                    sampleCount = allSamples.size
+                )
+            } else {
+                HeartRateSample(null, "", null, 0)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "readLatestHeartRate failed", e)
+            HeartRateSample(null, "", null, 0)
+        }
     }
 
     // Health Connect용 음식명 정제 (특수문자, 너무 긴 이름 제거)

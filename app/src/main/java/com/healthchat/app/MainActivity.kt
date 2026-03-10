@@ -17,9 +17,12 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.widget.*
+import android.widget.ProgressBar
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -30,7 +33,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.collect
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -62,6 +68,52 @@ class MainActivity : AppCompatActivity() {
     private var currentSummary: HealthSummary? = null
     private var categoryMenuOpen = false
     private var sessionsPanelOpen = false
+
+    // 실시간 심박수 모니터
+    private lateinit var heartRateMonitor: HeartRateMonitor
+    private lateinit var tvLiveHeartRate: TextView
+    private lateinit var tvHeartRateStatus: TextView
+    private lateinit var tvHeartRateTime: TextView
+    private lateinit var tvHeartBeatIcon: TextView
+    private lateinit var btnToggleHrMonitor: TextView
+    private lateinit var tvHrPollLabel: TextView
+    private lateinit var cardLiveHeartRate: android.view.ViewGroup
+    private var heartBeatAnimator: android.animation.ObjectAnimator? = null
+
+    // Tab navigation
+    private lateinit var tabHome: View
+    private lateinit var tabChat: View
+    private lateinit var tabRecords: View
+    private lateinit var tabProfile: View
+    private var currentTab = "home"
+
+    // Dashboard views
+    private lateinit var metricsContainer: LinearLayout
+    private lateinit var tvHealthScoreValue: TextView
+    private lateinit var tvHealthScoreGrade: TextView
+    private lateinit var pbHealthScore: ProgressBar
+    private lateinit var tvSleepScoreSmall: TextView
+    private lateinit var tvStressLevelSmall: TextView
+    private lateinit var tvHealthScoreBadge: TextView
+    private lateinit var tvTopBarDate: TextView
+    private lateinit var tvTopBarTitle: TextView
+    private lateinit var tvSleepSummary: TextView
+    private lateinit var tvNutritionSummary: TextView
+    private lateinit var tvExerciseSummary: TextView
+    private lateinit var recordsContent: LinearLayout
+    private lateinit var profileContent: LinearLayout
+    private lateinit var btnBell: View
+
+    // Bottom nav
+    private lateinit var navHomeIcon: ImageView
+    private lateinit var navChatIcon: ImageView
+    private lateinit var navRecordsIcon: ImageView
+    private lateinit var navProfileIcon: ImageView
+    private lateinit var navHomeLabel: TextView
+    private lateinit var navChatLabel: TextView
+    private lateinit var navRecordsLabel: TextView
+    private lateinit var navProfileLabel: TextView
+
     private var currentSessionId: String? = null
     private var userMessageCount = 0
 
@@ -109,6 +161,16 @@ class MainActivity : AppCompatActivity() {
         HealthCategory("\uD83C\uDFCB", "운동", "exercise"),
         HealthCategory("\uD83E\uDDEC", "체성분", "body"),
         HealthCategory("\uD83D\uDCCA", "전체요약", "all"),
+        HealthCategory("🩺", "혈압", "blood_pressure"),
+        HealthCategory("🩸", "혈당", "blood_glucose"),
+        HealthCategory("🌬️", "호흡수", "respiratory"),
+        HealthCategory("🏃", "VO2Max", "vo2max"),
+        HealthCategory("🏢", "층계", "floors"),
+        HealthCategory("🔥", "활동칼로리", "active_calories"),
+        HealthCategory("🧬", "건강점수", "health_score"),
+        HealthCategory("💤", "수면점수", "sleep_score"),
+        HealthCategory("🥗", "영양분석", "nutrition_analysis"),
+        HealthCategory("😤", "스트레스", "stress"),
     )
 
     private val requestPermissions = registerForActivityResult(
@@ -127,6 +189,7 @@ class MainActivity : AppCompatActivity() {
 
         healthReader = HealthDataReader(this)
         chatClient = ChatApiClient()
+        heartRateMonitor = HeartRateMonitor(healthReader)
 
         chatContainer = findViewById(R.id.chatContainer)
         scrollView = findViewById(R.id.scrollView)
@@ -165,6 +228,60 @@ class MainActivity : AppCompatActivity() {
         etMessage.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) { sendMessage(); true } else false
         }
+
+        // Tab navigation setup
+        tabHome = findViewById(R.id.tabHome)
+        tabChat = findViewById(R.id.tabChat)
+        tabRecords = findViewById(R.id.tabRecords)
+        tabProfile = findViewById(R.id.tabProfile)
+        metricsContainer = findViewById(R.id.metricsContainer)
+        tvHealthScoreValue = findViewById(R.id.tvHealthScoreValue)
+        tvHealthScoreGrade = findViewById(R.id.tvHealthScoreGrade)
+        pbHealthScore = findViewById(R.id.pbHealthScore)
+        tvSleepScoreSmall = findViewById(R.id.tvSleepScoreSmall)
+        tvStressLevelSmall = findViewById(R.id.tvStressLevelSmall)
+        tvHealthScoreBadge = findViewById(R.id.tvHealthScoreBadge)
+        tvTopBarDate = findViewById(R.id.tvTopBarDate)
+        tvTopBarTitle = findViewById(R.id.tvTopBarTitle)
+        tvSleepSummary = findViewById(R.id.tvSleepSummary)
+        tvNutritionSummary = findViewById(R.id.tvNutritionSummary)
+        tvExerciseSummary = findViewById(R.id.tvExerciseSummary)
+        recordsContent = findViewById(R.id.recordsContent)
+        profileContent = findViewById(R.id.profileContent)
+        btnBell = findViewById(R.id.btnBell)
+
+        navHomeIcon = findViewById(R.id.navHomeIcon)
+        navChatIcon = findViewById(R.id.navChatIcon)
+        navRecordsIcon = findViewById(R.id.navRecordsIcon)
+        navProfileIcon = findViewById(R.id.navProfileIcon)
+        navHomeLabel = findViewById(R.id.navHomeLabel)
+        navChatLabel = findViewById(R.id.navChatLabel)
+        navRecordsLabel = findViewById(R.id.navRecordsLabel)
+        navProfileLabel = findViewById(R.id.navProfileLabel)
+
+        // 실시간 심박수 뷰 바인딩
+        tvLiveHeartRate = findViewById(R.id.tvLiveHeartRate)
+        tvHeartRateStatus = findViewById(R.id.tvHeartRateStatus)
+        tvHeartRateTime = findViewById(R.id.tvHeartRateTime)
+        tvHeartBeatIcon = findViewById(R.id.tvHeartBeatIcon)
+        btnToggleHrMonitor = findViewById(R.id.btnToggleHrMonitor)
+        tvHrPollLabel = findViewById(R.id.tvHrPollLabel)
+        cardLiveHeartRate = findViewById(R.id.cardLiveHeartRate)
+        setupHeartRateMonitor()
+
+        // Bottom tab listeners
+        findViewById<View>(R.id.btnTabHome).setOnClickListener { switchTab("home") }
+        findViewById<View>(R.id.btnTabChat).setOnClickListener { switchTab("chat") }
+        findViewById<View>(R.id.btnTabRecords).setOnClickListener { switchTab("records") }
+        findViewById<View>(R.id.btnTabProfile).setOnClickListener { switchTab("profile") }
+
+        // Date in top bar
+        val today = java.time.LocalDate.now()
+        val formatter = java.time.format.DateTimeFormatter.ofPattern("M월 d일 (E)", java.util.Locale.KOREAN)
+        tvTopBarDate.text = today.format(formatter)
+
+        switchTab("home")
+        buildProfileTab()
 
         buildCategoryChips()
 
@@ -302,6 +419,16 @@ class MainActivity : AppCompatActivity() {
             "exercise" -> buildExerciseText(summary)
             "body" -> buildBodyCompositionText(summary)
             "all" -> buildAllText(summary)
+            "blood_pressure" -> { addHealthBubble(cat.emoji + " " + cat.label, buildBloodPressureText(summary)); return }
+            "blood_glucose" -> { addHealthBubble(cat.emoji + " " + cat.label, buildBloodGlucoseText(summary)); return }
+            "respiratory" -> { addHealthBubble(cat.emoji + " " + cat.label, buildRespiratoryText(summary)); return }
+            "vo2max" -> { addHealthBubble(cat.emoji + " " + cat.label, buildVo2MaxText(summary)); return }
+            "floors" -> { addHealthBubble(cat.emoji + " " + cat.label, buildFloorsText(summary)); return }
+            "active_calories" -> { addHealthBubble(cat.emoji + " " + cat.label, buildActiveCaloriesText(summary)); return }
+            "health_score" -> { addHealthBubble(cat.emoji + " " + cat.label, buildHealthScoreText(summary)); return }
+            "sleep_score" -> { addHealthBubble(cat.emoji + " " + cat.label, buildSleepScoreText(summary)); return }
+            "nutrition_analysis" -> { addHealthBubble(cat.emoji + " " + cat.label, buildNutritionAnalysisText(summary)); return }
+            "stress" -> { addHealthBubble(cat.emoji + " " + cat.label, buildStressText(summary)); return }
             else -> "데이터 없음"
         }
         addHealthBubble(cat.emoji + " " + cat.label + " (" + summary.lastUpdated + ")", text)
@@ -492,6 +619,86 @@ class MainActivity : AppCompatActivity() {
         return if (sb.length <= 20) "데이터 없음" else sb.toString().trimEnd()
     }
 
+    // ==================== 실시간 심박수 모니터 ====================
+
+    private fun setupHeartRateMonitor() {
+        btnToggleHrMonitor.setOnClickListener {
+            if (heartRateMonitor.isMonitoring()) {
+                heartRateMonitor.stopMonitoring()
+                btnToggleHrMonitor.text = "시작"
+                tvHrPollLabel.text = "15초 갱신"
+                stopHeartBeatAnimation()
+            } else {
+                startHeartRateMonitoring()
+            }
+        }
+
+        // StateFlow 관찰 → UI 갱신
+        lifecycleScope.launch {
+            heartRateMonitor.state.collect { state ->
+                updateHeartRateUI(state)
+            }
+        }
+    }
+
+    private fun startHeartRateMonitoring() {
+        btnToggleHrMonitor.text = "중지"
+        tvHrPollLabel.text = "15초 갱신 중"
+        heartRateMonitor.startMonitoring(lifecycleScope)
+        startHeartBeatAnimation()
+    }
+
+    private fun updateHeartRateUI(state: HeartRateState) {
+        runOnUiThread {
+            if (state.bpm != null) {
+                tvLiveHeartRate.text = state.bpm.toString()
+                tvLiveHeartRate.setTextColor(state.statusColor)
+            } else {
+                tvLiveHeartRate.text = "--"
+                tvLiveHeartRate.setTextColor(0xFFAAAAAA.toInt())
+            }
+            tvHeartRateStatus.text = "${state.statusEmoji} ${state.status}"
+            tvHeartRateStatus.setTextColor(state.statusColor)
+            if (state.lastTime.isNotEmpty()) {
+                tvHeartRateTime.text = "마지막: ${state.lastTime}" +
+                        if (state.recentAvg != null && state.recentAvg != state.bpm)
+                            "  (3분 평균: ${state.recentAvg}bpm)"
+                        else ""
+            }
+            // 카드 배경 상태별 변경
+            cardLiveHeartRate.setBackgroundColor(state.cardBg)
+        }
+    }
+
+    private fun startHeartBeatAnimation() {
+        heartBeatAnimator?.cancel()
+        heartBeatAnimator = ObjectAnimator.ofFloat(tvHeartBeatIcon, "scaleX", 1f, 1.35f, 1f).apply {
+            duration = 700
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = DecelerateInterpolator()
+            start()
+        }
+        ObjectAnimator.ofFloat(tvHeartBeatIcon, "scaleY", 1f, 1.35f, 1f).apply {
+            duration = 700
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = DecelerateInterpolator()
+            start()
+        }
+    }
+
+    private fun stopHeartBeatAnimation() {
+        heartBeatAnimator?.cancel()
+        heartBeatAnimator = null
+        tvHeartBeatIcon.scaleX = 1f
+        tvHeartBeatIcon.scaleY = 1f
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        heartRateMonitor.stopMonitoring()
+        stopHeartBeatAnimation()
+    }
+
     // ==================== Health Data ====================
 
     private fun loadHealthData() {
@@ -501,6 +708,9 @@ class MainActivity : AppCompatActivity() {
                 currentSummary = summary
                 currentHealthContext = summary.toContextString()
                 Log.d("HealthChat", "Health context loaded:\n$currentHealthContext")
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    buildHomeDashboard(summary)
+                }
             } catch (e: Exception) {
                 Log.e("HealthChat", "Failed to read health data", e)
                 addSystemMessage("건강 데이터 읽기 실패: ${e.message}")
@@ -1682,6 +1892,334 @@ $context
 
             addHealthBubble("📊 주간 트렌드 ($resTime)", sb.toString().trimEnd())
         }
+    }
+
+    // ==================== Tab Navigation ====================
+
+    private fun switchTab(tab: String) {
+        currentTab = tab
+        tabHome.visibility = if (tab == "home") View.VISIBLE else View.GONE
+        tabChat.visibility = if (tab == "chat") View.VISIBLE else View.GONE
+        tabRecords.visibility = if (tab == "records") View.VISIBLE else View.GONE
+        tabProfile.visibility = if (tab == "profile") View.VISIBLE else View.GONE
+
+        val orange = 0xFFFF6F0F.toInt()
+        val gray = 0xFF888888.toInt()
+        listOf(
+            Triple(navHomeIcon, navHomeLabel, "home"),
+            Triple(navChatIcon, navChatLabel, "chat"),
+            Triple(navRecordsIcon, navRecordsLabel, "records"),
+            Triple(navProfileIcon, navProfileLabel, "profile")
+        ).forEach { (icon, label, t) ->
+            val active = t == tab
+            icon.setColorFilter(if (active) orange else gray)
+            label.setTextColor(if (active) orange else gray)
+        }
+
+        tvTopBarDate.visibility = if (tab == "home") View.VISIBLE else View.GONE
+        tvTopBarTitle.visibility = if (tab != "home") View.VISIBLE else View.GONE
+        tvHealthScoreBadge.visibility = if (tab == "home") View.VISIBLE else View.GONE
+        btnBell.visibility = if (tab == "home") View.VISIBLE else View.GONE
+        btnSessionMenu.visibility = if (tab == "chat") View.VISIBLE else View.GONE
+        btnHealthMenu.visibility = if (tab == "chat") View.VISIBLE else View.GONE
+
+        when (tab) {
+            "chat" -> tvTopBarTitle.text = "AI 코치"
+            "records" -> tvTopBarTitle.text = "건강 기록"
+            "profile" -> tvTopBarTitle.text = "마이페이지"
+        }
+    }
+
+    private fun buildHomeDashboard(summary: HealthSummary) {
+        val scoreVal = summary.healthScore ?: 70
+        tvHealthScoreValue.text = scoreVal.toString()
+        tvHealthScoreBadge.text = "${scoreVal}점"
+        pbHealthScore.progress = scoreVal
+        tvHealthScoreGrade.text = when {
+            scoreVal >= 90 -> "최우수 🌟"
+            scoreVal >= 80 -> "우수 💪"
+            scoreVal >= 70 -> "양호 👍"
+            scoreVal >= 60 -> "보통 😊"
+            else -> "주의 필요 ⚠️"
+        }
+        val sleepScore = summary.sleepScore ?: 0
+        tvSleepScoreSmall.text = if (sleepScore > 0) "$sleepScore" else "--"
+        tvStressLevelSmall.text = when (summary.stressLevel) {
+            "낮음" -> "낮음 😌"; "보통" -> "보통 😐"; "높음" -> "높음 😰"
+            "매우높음" -> "매우높음 😱"; else -> "--"
+        }
+        tvSleepSummary.text = if (summary.sleepHours != null) {
+            val h = summary.sleepHours
+            "수면 시간: ${"%.1f".format(h)}시간" +
+            (if (sleepScore > 0) "  |  수면 점수: ${sleepScore}점" else "") +
+            when { h in 7.0..9.0 -> " ✅"; h >= 6.0 -> " ⚠️ 약간 부족"; else -> " ❌ 수면 부족" }
+        } else "수면 데이터 없음"
+        tvNutritionSummary.text = if (summary.nutritionTodayCalories != null) {
+            "칼로리: ${"%.0f".format(summary.nutritionTodayCalories)}kcal" +
+            (summary.nutritionTodayCarbs?.let { "  탄: ${"%.0f".format(it)}g" } ?: "") +
+            (summary.nutritionTodayProtein?.let { "  단: ${"%.0f".format(it)}g" } ?: "") +
+            (summary.nutritionTodayFat?.let { "  지: ${"%.0f".format(it)}g" } ?: "")
+        } else "식사 기록이 없습니다"
+        tvExerciseSummary.text = if (summary.exercises.isNotEmpty())
+            "최근 7일: " + summary.exercises.take(3).joinToString(", ")
+        else "최근 7일 운동 기록이 없습니다"
+
+        buildMetricCards(summary)
+        buildRecordsDashboard(summary)
+    }
+
+    private data class MetricCardData(
+        val iconRes: Int, val value: String, val unit: String,
+        val label: String, val hasData: Boolean = true
+    )
+
+    private fun buildMetricCards(s: HealthSummary) {
+        metricsContainer.removeAllViews()
+        val metrics = listOf(
+            MetricCardData(R.drawable.ic_steps, s.steps?.let { "%,d".format(it) } ?: "--", "보", "걸음수", s.steps != null),
+            MetricCardData(R.drawable.ic_heart, s.heartRateAvg?.toString() ?: "--", "bpm", "심박수", s.heartRateAvg != null),
+            MetricCardData(R.drawable.ic_sleep, s.sleepHours?.let { "%.1f".format(it) } ?: "--", "시간", "수면", s.sleepHours != null),
+            MetricCardData(R.drawable.ic_fire, s.caloriesBurned?.let { "%.0f".format(it) } ?: "--", "kcal", "총칼로리", s.caloriesBurned != null),
+            MetricCardData(R.drawable.ic_fire, s.activeCaloriesBurned?.let { "%.0f".format(it) } ?: "--", "kcal", "활동칼로리", s.activeCaloriesBurned != null),
+            MetricCardData(R.drawable.ic_blood_pressure,
+                if (s.bloodPressureSystolic != null && s.bloodPressureDiastolic != null)
+                    "${s.bloodPressureSystolic.toInt()}/${s.bloodPressureDiastolic.toInt()}"
+                else "--", "mmHg", "혈압", s.bloodPressureSystolic != null),
+            MetricCardData(R.drawable.ic_glucose, s.bloodGlucose?.let { "%.0f".format(it) } ?: "--", "mg/dL", "혈당", s.bloodGlucose != null),
+            MetricCardData(R.drawable.ic_spo2, s.oxygenSaturation?.let { "%.1f".format(it) } ?: "--", "%", "산소포화도", s.oxygenSaturation != null),
+            MetricCardData(R.drawable.ic_water_drop, "--", "ml", "수분", false),
+            MetricCardData(R.drawable.ic_breath, s.respiratoryRate?.let { "%.0f".format(it) } ?: "--", "/분", "호흡수", s.respiratoryRate != null),
+            MetricCardData(R.drawable.ic_vo2, s.vo2Max?.let { "%.1f".format(it) } ?: "--", "ml/kg", "VO2Max", s.vo2Max != null),
+            MetricCardData(R.drawable.ic_floors, s.floorsClimbed?.let { "%.0f".format(it) } ?: "--", "층", "오른층수", s.floorsClimbed != null),
+            MetricCardData(R.drawable.ic_weight, s.weight?.let { "%.1f".format(it) } ?: "--", "kg", "체중", s.weight != null),
+            MetricCardData(R.drawable.ic_stress, s.stressLevel?.takeIf { it != "데이터없음" } ?: "--", "", "스트레스", s.stressLevel != null && s.stressLevel != "데이터없음"),
+        )
+        for (m in metrics) metricsContainer.addView(createMetricCard(m))
+    }
+
+    private fun createMetricCard(m: MetricCardData): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(dpToPx(12), dpToPx(14), dpToPx(12), dpToPx(14))
+            background = resources.getDrawable(R.drawable.daangn_metric_card_bg, null)
+            elevation = dpToPx(2).toFloat()
+            val lp = LinearLayout.LayoutParams(dpToPx(108), dpToPx(130))
+            lp.marginEnd = dpToPx(10)
+            layoutParams = lp
+        }
+        val icon = ImageView(this).apply {
+            val sz = dpToPx(28)
+            layoutParams = LinearLayout.LayoutParams(sz, sz).apply { bottomMargin = dpToPx(6) }
+            setImageResource(m.iconRes)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            if (!m.hasData) alpha = 0.4f
+        }
+        val valueTv = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            text = m.value
+            textSize = if (m.value.length > 6) 15f else 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(if (m.hasData) 0xFF1C1B1F.toInt() else 0xFFAAAAAA.toInt())
+        }
+        val unitTv = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            text = m.unit
+            textSize = 10f
+            setTextColor(0xFF888888.toInt())
+        }
+        val labelTv = TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dpToPx(4) }
+            text = m.label
+            textSize = 11f
+            setTextColor(0xFF666666.toInt())
+        }
+        card.addView(icon); card.addView(valueTv); card.addView(unitTv); card.addView(labelTv)
+        return card
+    }
+
+    private fun buildRecordsDashboard(summary: HealthSummary) {
+        recordsContent.removeAllViews()
+        fun addCard(emoji: String, title: String, subtitle: String, action: () -> Unit) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                background = resources.getDrawable(R.drawable.daangn_card_bg, null)
+                setPadding(dpToPx(16), dpToPx(14), dpToPx(16), dpToPx(14))
+                elevation = dpToPx(1).toFloat()
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                lp.bottomMargin = dpToPx(12)
+                layoutParams = lp
+                isClickable = true; isFocusable = true
+                setOnClickListener { action() }
+            }
+            card.addView(TextView(this).apply { text = emoji; textSize = 24f; setPadding(0,0,dpToPx(12),0) })
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            col.addView(TextView(this).apply { text = title; textSize = 15f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF1C1B1F.toInt()) })
+            col.addView(TextView(this).apply { text = subtitle; textSize = 12f; setTextColor(0xFF888888.toInt()) })
+            card.addView(col)
+            card.addView(TextView(this).apply { text = "›"; textSize = 20f; setTextColor(0xFFAAAAAA.toInt()) })
+            recordsContent.addView(card)
+        }
+        addCard("🍽️", "식사 기록", summary.nutritionTodayCalories?.let { "오늘 ${"%.0f".format(it)}kcal" } ?: "기록하기") { switchTab("chat"); showFoodLogBubble() }
+        addCard("💧", "수분 섭취", "하루 권장 2,000ml") { switchTab("chat"); showWaterBubble() }
+        addCard("📊", "주간 트렌드", "7일 건강 데이터") { switchTab("chat"); showWeeklyTrendBubble() }
+        if (summary.exercises.isNotEmpty())
+            addCard("🏋️", "운동 기록", "${summary.exercises.size}건 (최근 7일)") { switchTab("chat"); onCategoryClick(categories.find { it.key == "exercise" }!!) }
+
+        val sectionTv = TextView(this).apply {
+            text = "상세 건강 데이터"
+            textSize = 16f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF1C1B1F.toInt())
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = dpToPx(8); lp.bottomMargin = dpToPx(8); layoutParams = lp
+        }
+        recordsContent.addView(sectionTv)
+
+        addCard("🩺", "혈압", summary.bloodPressureSystolic?.let { "${it.toInt()}/${summary.bloodPressureDiastolic?.toInt()}mmHg" } ?: "측정 없음") { switchTab("chat"); onCategoryClick(categories.find { it.key == "blood_pressure" }!!) }
+        addCard("🩸", "혈당", summary.bloodGlucose?.let { "${"%.0f".format(it)}mg/dL" } ?: "측정 없음") { switchTab("chat"); onCategoryClick(categories.find { it.key == "blood_glucose" }!!) }
+        addCard("🧬", "건강 점수 분석", "${summary.healthScore ?: "--"}점/100") { switchTab("chat"); onCategoryClick(categories.find { it.key == "health_score" }!!) }
+        addCard("😤", "스트레스", summary.stressLevel?.takeIf { it != "데이터없음" } ?: "측정 없음") { switchTab("chat"); onCategoryClick(categories.find { it.key == "stress" }!!) }
+    }
+
+    private fun buildProfileTab() {
+        profileContent.removeAllViews()
+        fun addSection(title: String, content: String) {
+            val titleTv = TextView(this).apply {
+                text = title; textSize = 14f; setTypeface(null, Typeface.BOLD); setTextColor(0xFF888888.toInt())
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                lp.topMargin = dpToPx(16); lp.bottomMargin = dpToPx(4); layoutParams = lp
+            }
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = resources.getDrawable(R.drawable.daangn_card_bg, null)
+                setPadding(dpToPx(16), dpToPx(12), dpToPx(16), dpToPx(12))
+                elevation = dpToPx(1).toFloat()
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            card.addView(TextView(this).apply {
+                text = content; textSize = 14f; setTextColor(0xFF1C1B1F.toInt()); setLineSpacing(4f, 1.2f)
+            })
+            profileContent.addView(titleTv); profileContent.addView(card)
+        }
+        addSection("체성분", currentSummary?.let {
+            val sb = StringBuilder()
+            it.weight?.let { w -> sb.appendLine("체중: ${"%.1f".format(w)}kg") }
+            it.height?.let { h -> sb.appendLine("키: ${"%.0f".format(h * 100)}cm") }
+            it.bmi?.let { b -> sb.appendLine("BMI: ${"%.1f".format(b)}") }
+            it.bodyFat?.let { f -> sb.appendLine("체지방률: ${"%.1f".format(f)}%") }
+            it.leanBodyMass?.let { l -> sb.appendLine("근육량: ${"%.1f".format(l)}kg") }
+            it.basalMetabolicRate?.let { b -> sb.appendLine("기초대사량: ${b}kcal") }
+            sb.toString().trimEnd()
+        } ?: "건강 데이터 로딩 후 확인 가능합니다")
+        addSection("앱 정보", "Health Chat v1.0\nAI 기반 건강 관리\nPowered by Claude AI")
+        profileContent.addView(Button(this).apply {
+            text = "⚙️  Health Connect 권한 설정"
+            setBackgroundColor(0xFFFF6F0F.toInt()); setTextColor(0xFFFFFFFF.toInt())
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = dpToPx(16); layoutParams = lp
+            setOnClickListener { openHealthConnectSettings() }
+        })
+    }
+
+    private fun buildBloodPressureText(s: HealthSummary): String {
+        if (s.bloodPressureSystolic == null) return "혈압 데이터가 없습니다.\n삼성 헬스에서 혈압 측정 후 Health Connect에서 동기화해주세요."
+        val sys = s.bloodPressureSystolic.toInt()
+        val dia = s.bloodPressureDiastolic?.toInt() ?: 0
+        val status = when { sys < 120 && dia < 80 -> "정상 ✅"; sys < 130 && dia < 80 -> "주의 ⚠️"; sys < 140 || dia < 90 -> "고혈압 전단계 ⚠️"; else -> "고혈압 ❌" }
+        return "수축기: ${sys}mmHg\n이완기: ${dia}mmHg\n상태: $status\n\n정상: 120/80mmHg 미만"
+    }
+
+    private fun buildBloodGlucoseText(s: HealthSummary): String {
+        if (s.bloodGlucose == null) return "혈당 데이터가 없습니다."
+        val v = s.bloodGlucose
+        val status = when { v < 70 -> "저혈당 ⚠️"; v < 100 -> "정상 ✅"; v < 126 -> "전당뇨 ⚠️"; else -> "높음 ❌" }
+        return "혈당: ${"%.0f".format(v)}mg/dL\n상태: $status\n\n정상 공복: 70-99mg/dL"
+    }
+
+    private fun buildRespiratoryText(s: HealthSummary): String {
+        if (s.respiratoryRate == null) return "호흡수 데이터가 없습니다."
+        val rate = s.respiratoryRate
+        val status = when { rate in 12.0..20.0 -> "정상 ✅"; rate < 12.0 -> "서호흡 ⚠️"; else -> "빈호흡 ⚠️" }
+        return "호흡수: ${"%.0f".format(rate)}회/분\n상태: $status\n정상: 12-20회/분"
+    }
+
+    private fun buildVo2MaxText(s: HealthSummary): String {
+        if (s.vo2Max == null) return "VO2Max 데이터가 없습니다.\n달리기 운동 후 측정됩니다."
+        val v = s.vo2Max
+        val level = when { v >= 55.0 -> "매우 우수 🌟"; v >= 45.0 -> "우수 💪"; v >= 35.0 -> "보통 👍"; v >= 25.0 -> "낮음 ⚠️"; else -> "매우 낮음 ❌" }
+        return "VO2Max: ${"%.1f".format(v)}ml/kg/min\n심폐 체력: $level"
+    }
+
+    private fun buildFloorsText(s: HealthSummary): String {
+        if (s.floorsClimbed == null) return "오른 층수 데이터가 없습니다."
+        val floors = s.floorsClimbed.toInt()
+        return "오늘 오른 층수: ${floors}층\n${when { floors >= 10 -> "훌륭해요! 🎉"; floors >= 5 -> "좋아요 👍"; else -> "계단을 더 이용해보세요 🏃" }}\n목표: 하루 10층 이상"
+    }
+
+    private fun buildActiveCaloriesText(s: HealthSummary): String {
+        val sb = StringBuilder()
+        s.activeCaloriesBurned?.let { sb.appendLine("활동 칼로리: ${"%.0f".format(it)}kcal") }
+        s.caloriesBurned?.let { sb.appendLine("총 소모 칼로리: ${"%.0f".format(it)}kcal") }
+        if (s.activeCaloriesBurned != null && s.caloriesBurned != null) {
+            val basal = s.caloriesBurned - s.activeCaloriesBurned
+            if (basal > 0) sb.appendLine("기초 대사: ${"%.0f".format(basal)}kcal")
+        }
+        return if (sb.isEmpty()) "활동 칼로리 데이터가 없습니다." else sb.append("\n목표: 활동 칼로리 300kcal+").toString().trimEnd()
+    }
+
+    private fun buildHealthScoreText(s: HealthSummary): String {
+        if (s.healthScore == null) return "건강 점수를 계산할 데이터가 부족합니다."
+        val grade = when { s.healthScore >= 90 -> "최우수"; s.healthScore >= 80 -> "우수"; s.healthScore >= 70 -> "양호"; s.healthScore >= 60 -> "보통"; else -> "주의 필요" }
+        val sb = StringBuilder()
+        sb.appendLine("🏆 건강 점수: ${s.healthScore}/100  ($grade)")
+        sb.appendLine()
+        sb.appendLine("📊 항목별 평가:")
+        s.steps?.let { sb.appendLine("  👣 걸음수: ${if (it >= 10000) "✅" else "⚠️"} ${"%,d".format(it)}보") }
+        s.sleepHours?.let { sb.appendLine("  💤 수면: ${if (it in 7.0..9.0) "✅" else "⚠️"} ${"%.1f".format(it)}시간") }
+        s.heartRateAvg?.let { sb.appendLine("  ❤️ 심박수: ${if (it in 60..80) "✅" else "⚠️"} ${it}bpm") }
+        s.oxygenSaturation?.let { sb.appendLine("  🫁 산소: ${if (it >= 95) "✅" else "⚠️"} ${"%.1f".format(it)}%") }
+        s.bmi?.let { sb.appendLine("  ⚖️ BMI: ${if (it in 18.5..23.0) "✅" else "⚠️"} ${"%.1f".format(it)}") }
+        s.hrv?.let { sb.appendLine("  🧠 HRV: ${if (it >= 35.0) "✅" else "⚠️"} ${"%.1f".format(it)}ms") }
+        return sb.toString().trimEnd()
+    }
+
+    private fun buildSleepScoreText(s: HealthSummary): String {
+        if (s.sleepScore == null || s.sleepScore == 0) return "수면 점수 데이터가 없습니다."
+        val grade = when { s.sleepScore >= 85 -> "우수 😴✨"; s.sleepScore >= 70 -> "양호 😴"; s.sleepScore >= 50 -> "보통 😐"; else -> "불량 ⚠️" }
+        return "💤 수면 점수: ${s.sleepScore}/100  ($grade)\n수면 시간: ${s.sleepHours?.let { "%.1f".format(it) } ?: "--"}시간\n\n수면 시간(60점) + 깊은수면 비율(40점)"
+    }
+
+    private fun buildNutritionAnalysisText(s: HealthSummary): String {
+        if (s.nutritionTodayCalories == null) return "오늘 영양 기록이 없습니다.\n📷 카메라로 음식 사진을 찍어 기록하세요!"
+        val sb = StringBuilder()
+        sb.appendLine("🥗 오늘 영양 분석")
+        sb.appendLine("칼로리: ${"%.0f".format(s.nutritionTodayCalories)}kcal")
+        s.nutritionTodayCarbs?.let { sb.appendLine("탄수화물: ${"%.0f".format(it)}g") }
+        s.nutritionTodayProtein?.let { sb.appendLine("단백질: ${"%.0f".format(it)}g") }
+        s.nutritionTodayFat?.let { sb.appendLine("지방: ${"%.0f".format(it)}g") }
+        val total = (s.nutritionTodayCarbs ?: 0.0) + (s.nutritionTodayProtein ?: 0.0) + (s.nutritionTodayFat ?: 0.0)
+        if (total > 0) {
+            val c = ((s.nutritionTodayCarbs ?: 0.0) / total * 100).toInt()
+            val p = ((s.nutritionTodayProtein ?: 0.0) / total * 100).toInt()
+            val f = ((s.nutritionTodayFat ?: 0.0) / total * 100).toInt()
+            sb.appendLine("\n매크로 비율:\n  탄: $c%  단: $p%  지: $f%")
+            sb.appendLine("권장: 탄 50-60% / 단 15-25% / 지 20-35%")
+        }
+        return sb.toString().trimEnd()
+    }
+
+    private fun buildStressText(s: HealthSummary): String {
+        val level = s.stressLevel ?: "데이터없음"
+        val emoji = when (level) { "낮음" -> "😌"; "보통" -> "😐"; "높음" -> "😰"; "매우높음" -> "😱"; else -> "🤔" }
+        val sb = StringBuilder()
+        sb.appendLine("$emoji 스트레스: $level")
+        s.hrv?.let { sb.appendLine("HRV: ${"%.1f".format(it)}ms RMSSD") }
+        sb.appendLine("\nHRV 스트레스 기준:\n  >60ms 낮음  35-60ms 보통  15-35ms 높음  <15ms 매우높음")
+        if (s.hrv == null) sb.appendLine("\n⚠️ 갤럭시 워치에서 스트레스 측정을 활성화해주세요.")
+        return sb.toString().trimEnd()
     }
 
     // ==================== Session Adapter ====================
